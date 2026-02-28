@@ -15,11 +15,12 @@ for i, port in enumerate(ports):
     
 com = int(input("Select port number: "))
 
-
+# Link to port on arduino
 serialInst.baudrate = 9600
 serialInst.port = portsList[com]  # use the clean device path directly
 serialInst.open()
 
+# open loop to keep it running until user exits
 while True:
     command = input("Arduino Command (0-180): ")
     print(command)
