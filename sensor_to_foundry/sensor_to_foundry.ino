@@ -25,7 +25,7 @@ void connectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
     return;
   }
-
+  
   Serial.print("Connecting to Wi-Fi");
 
   WiFi.begin(SECRET_SSID, SECRET_PASS);
@@ -45,7 +45,7 @@ void connectToWiFi() {
   Serial.println();
   Serial.println("Connected to Wi-Fi");
   Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  Serial.println(WiFi.localIP().toString());
 }
 
 /*
@@ -182,7 +182,7 @@ bool publishToFoundry(int moisture, const char *plantName) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
 
   // The sensor's analog output must be an input.
   pinMode(SOIL_SENSOR_PIN, INPUT);
@@ -210,7 +210,7 @@ void loop() {
 
     bool published = publishToFoundry(
         moisture,
-        "value"  // Replace with your plant name.
+        "Dracacena"  // Replace with your plant name.
     );
 
     if (published) {
