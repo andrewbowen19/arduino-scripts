@@ -1,31 +1,44 @@
 #include <WiFiS3.h>
 #include <time.h>
-#include "arduino_secrets.h"
 
-const char foundryHost[] =
+#include "arduino_secrets.h"
+#include "plant_config.h"
+
+// ------------------------------------------------------------
+// Foundry configuration
+// ------------------------------------------------------------
+
+const char FOUNDRY_HOST[] =
     "andrewssandbox.usw-17.palantirfoundry.com";
 
-const char foundryPath[] =
-    "/api/v2/highScale/streams/datasets/"
-    "ri.foundry.main.dataset.6a46b15b-a807-4115-a890-dcefde328b97"
-    "/streams/master/publishRecords?preview=true";
+const char FOUNDRY_STREAM_RID[] =
+    "ri.foundry.main.dataset.d746df15-c23d-41de-908d-a17e9050ee64";
 
-const int SOIL_SENSOR_PIN = A0;
-const int OUTPUT_PIN = 12;
-const int MOISTURE_THRESHOLD = 850;
-
-// Avoid publishing every loop unless that is intentional.
+// Publish every 10 seconds.
+// Increase this for normal operation if readings do not need to
+// be sent this frequently.
 const unsigned long PUBLISH_INTERVAL_MS = 10000;
+
+// Maximum time to wait for an HTTP response.
+const unsigned long HTTP_TIMEOUT_MS = 15000;
+
+// ------------------------------------------------------------
+// Global variables
+// ------------------------------------------------------------
 
 WiFiSSLClient client;
 
 unsigned long lastPublishTime = 0;
 
-void connectToWiFi() {
+// ------------------------------------------------------------
+// Wi-Fi
+// ------------------------------------------------------------
+
+bool connectToWiFi() {
   if (WiFi.status() == WL_CONNECTED) {
-    return;
+    return true;
   }
-  
+
   Serial.print("Connecting to Wi-Fi");
 
   WiFi.begin(SECRET_SSID, SECRET_PASS);
@@ -36,116 +49,221 @@ void connectToWiFi() {
     delay(500);
     Serial.print(".");
 
-    if (millis() - startTime > 30000) {
-      Serial.println("\nWi-Fi connection timed out.");
-      return;
+    if (millis() - startTime >= 30000) {
+      Serial.println();
+      Serial.println("Wi-Fi connection timed out.");
+      return false;
     }
   }
 
   Serial.println();
   Serial.println("Connected to Wi-Fi");
+
   Serial.print("IP address: ");
-  Serial.println(WiFi.localIP().toString());
+  Serial.println(WiFi.localIP());
+
+  return true;
 }
 
-/*
- * Gets the current time from the WiFi module and formats it as:
- * 2026-08-11T15:39:15Z
- */
-String getIsoTimestamp() {
-  unsigned long epoch = WiFi.getTime();
+// ------------------------------------------------------------
+// Timestamp
+// ------------------------------------------------------------
 
-  if (epoch == 0) {
+String getEpochMilliseconds() {
+  // WiFi.getTime() returns seconds since 1970-01-01 UTC.
+  unsigned long epochSeconds = WiFi.getTime();
+
+  if (epochSeconds == 0) {
     Serial.println("Unable to get network time.");
     return "";
   }
 
-  time_t rawTime = (time_t)epoch;
-  struct tm *utcTime = gmtime(&rawTime);
-
-  if (utcTime == nullptr) {
-    return "";
-  }
-
-  char timestamp[25];
-
-  strftime(
-      timestamp,
-      sizeof(timestamp),
-      "%Y-%m-%dT%H:%M:%SZ",
-      utcTime
-  );
-
-  return String(timestamp);
+  /*
+   * Foundry expects milliseconds.
+   *
+   * Appending "000" avoids overflowing a 32-bit unsigned long
+   * when multiplying epoch seconds by 1000.
+   */
+  return String(epochSeconds) + "000";
 }
 
-bool publishToFoundry(int moisture, const char *plantName) {
-  if (WiFi.status() != WL_CONNECTED) {
-    connectToWiFi();
 
-    if (WiFi.status() != WL_CONNECTED) {
-      return false;
+// ------------------------------------------------------------
+// JSON helpers
+// ------------------------------------------------------------
+
+String jsonEscape(const char *value) {
+  String escaped;
+
+  while (*value != '\0') {
+    char current = *value;
+
+    switch (current) {
+      case '"':
+        escaped += "\\\"";
+        break;
+
+      case '\\':
+        escaped += "\\\\";
+        break;
+
+      case '\n':
+        escaped += "\\n";
+        break;
+
+      case '\r':
+        escaped += "\\r";
+        break;
+
+      case '\t':
+        escaped += "\\t";
+        break;
+
+      default:
+        escaped += current;
+        break;
     }
+
+    value++;
   }
 
-  String timestamp = getIsoTimestamp();
+  return escaped;
+}
 
-  if (timestamp.length() == 0) {
-    Serial.println("Skipping publish because timestamp is unavailable.");
+// ------------------------------------------------------------
+// Read sensors and build the Foundry request
+// ------------------------------------------------------------
+
+bool publishAllPlantsToFoundry() {
+  if (!connectToWiFi()) {
+    Serial.println("Cannot publish because Wi-Fi is disconnected.");
     return false;
   }
 
-  String body =
-      "{\"records\":[{"
-      "\"timestamp\":\"" + timestamp + "\","
-      "\"soil_moisture\":" + String(moisture) + ","
-      "\"plant_name\":\"" + String(plantName) + "\""
-      "}]}";
+String timestampMilliseconds = getEpochMilliseconds();
 
-  Serial.println("Connecting to Foundry...");
+if (timestampMilliseconds.length() == 0) {
+  Serial.println(
+      "Skipping publish because the timestamp is unavailable."
+  );
+  return false;
+}
 
-  if (!client.connect(foundryHost, 443)) {
+
+  String body;
+
+  // Preallocate some memory to reduce String reallocations.
+  body.reserve(100 + (PLANT_COUNT * 150));
+
+  body = "{\"records\":[";
+
+  for (size_t i = 0; i < PLANT_COUNT; i++) {
+    const PlantConfig &plant = PLANTS[i];
+
+    int moisture = analogRead(plant.analogPin);
+
+    Serial.println("--------------------------------");
+    Serial.print("Plant: ");
+    Serial.println(plant.plantName);
+
+    Serial.print("Analog pin: ");
+    Serial.println(plant.analogPin);
+
+    Serial.print("Soil moisture: ");
+    Serial.println(moisture);
+
+    if (moisture > plant.dryThreshold) {
+      Serial.println("Status: Soil moisture low");
+    } else {
+      Serial.println("Status: Soil moisture high");
+    }
+
+    // Insert a comma before every record except the first one.
+    if (i > 0) {
+      body += ",";
+    }
+
+    body += "{";
+
+    body += "\"timestamp\":";
+    body += timestampMilliseconds;
+    body += ",";
+
+    body += "\"water_level\":";
+    body += String(moisture);
+    body += ",";
+
+    body += "\"plant_name\":\"";
+    body += jsonEscape(plant.plantName);
+    body += "\",";
+
+    body += "\"plant_id\":\"";
+    body += jsonEscape(plant.plantId);
+    body += "\"";
+
+    body += "}";
+  }
+
+  body += "]}";
+
+  // Construct the endpoint for the single shared stream.
+  String foundryPath =
+      "/api/v2/highScale/streams/datasets/";
+
+  foundryPath += FOUNDRY_STREAM_RID;
+  foundryPath +=
+      "/streams/master/publishRecords?preview=true";
+
+  Serial.println("--------------------------------");
+  Serial.println("Publishing batch to Foundry");
+  Serial.println("Request body:");
+  Serial.println(body);
+
+  // Open a TLS connection to Foundry.
+  if (!client.connect(FOUNDRY_HOST, 443)) {
     Serial.println("TLS connection to Foundry failed.");
     return false;
   }
 
-  // Equivalent to curl -X POST
+  // HTTP request line
   client.print("POST ");
   client.print(foundryPath);
   client.println(" HTTP/1.1");
 
-  // Equivalent to the curl headers
+  // HTTP headers
   client.print("Host: ");
-  client.println(foundryHost);
+  client.println(FOUNDRY_HOST);
 
   client.print("Authorization: Bearer ");
   client.println(FOUNDRY_TOKEN);
 
   client.println("Content-Type: application/json");
+
   client.print("Content-Length: ");
   client.println(body.length());
+
   client.println("Connection: close");
 
   // Blank line separates headers from the request body.
   client.println();
 
-  // Equivalent to curl -d
+  // HTTP request body
   client.print(body);
 
-  Serial.println("Request body:");
-  Serial.println(body);
-
-  // Wait up to 15 seconds for a response.
+  // Wait for Foundry to respond.
   unsigned long responseStart = millis();
 
   while (!client.available()) {
     if (!client.connected()) {
-      Serial.println("Foundry closed the connection without a response.");
+      Serial.println(
+          "Foundry closed the connection without a response."
+      );
+
       client.stop();
       return false;
     }
 
-    if (millis() - responseStart > 15000) {
+    if (millis() - responseStart >= HTTP_TIMEOUT_MS) {
       Serial.println("Timed out waiting for Foundry.");
       client.stop();
       return false;
@@ -154,7 +272,7 @@ bool publishToFoundry(int moisture, const char *plantName) {
     delay(10);
   }
 
-  // The first response line looks like:
+  // Read the first line, such as:
   // HTTP/1.1 200 OK
   String statusLine = client.readStringUntil('\n');
   statusLine.trim();
@@ -168,57 +286,63 @@ bool publishToFoundry(int moisture, const char *plantName) {
       statusLine.indexOf(" 202 ") >= 0 ||
       statusLine.indexOf(" 204 ") >= 0;
 
-  // Print the remaining headers and response body for debugging.
-  while (client.connected() || client.available()) {
+  // Print the remaining response headers and body.
+  unsigned long lastResponseData = millis();
+
+  while (
+      (client.connected() || client.available()) &&
+      millis() - lastResponseData < 10000
+  ) {
     while (client.available()) {
       Serial.write(client.read());
+      lastResponseData = millis();
     }
+
+    delay(1);
   }
 
   Serial.println();
   client.stop();
 
+  if (success) {
+    Serial.println("Plant readings published successfully.");
+  } else {
+    Serial.println("Plant readings failed to publish.");
+  }
+
   return success;
 }
+
+// ------------------------------------------------------------
+// Arduino setup
+// ------------------------------------------------------------
 
 void setup() {
   Serial.begin(9600);
 
-  // The sensor's analog output must be an input.
-  pinMode(SOIL_SENSOR_PIN, INPUT);
-  pinMode(OUTPUT_PIN, OUTPUT);
-
-  connectToWiFi();
-}
-
-void loop() {
-  int moisture = analogRead(SOIL_SENSOR_PIN);
-
-  Serial.print("Soil moisture: ");
-  Serial.println(moisture);
-
-  if (moisture > MOISTURE_THRESHOLD) {
-    digitalWrite(OUTPUT_PIN, LOW);
-    Serial.println("Soil moisture low");
-  } else {
-    digitalWrite(OUTPUT_PIN, HIGH);
-    Serial.println("Soil moisture high");
+  // Configure all plant sensor pins as analog inputs.
+  for (size_t i = 0; i < PLANT_COUNT; i++) {
+    pinMode(PLANTS[i].analogPin, INPUT);
   }
 
+  connectToWiFi();
+
+  // Send an initial reading after startup.
+  publishAllPlantsToFoundry();
+
+  lastPublishTime = millis();
+}
+
+// ------------------------------------------------------------
+// Arduino main loop
+// ------------------------------------------------------------
+
+void loop() {
   if (millis() - lastPublishTime >= PUBLISH_INTERVAL_MS) {
     lastPublishTime = millis();
 
-    bool published = publishToFoundry(
-        moisture,
-        "Dracacena"  // Replace with your plant name.
-    );
-
-    if (published) {
-      Serial.println("Record published successfully.");
-    } else {
-      Serial.println("Record publish failed.");
-    }
+    publishAllPlantsToFoundry();
   }
 
-  delay(2000);
+  delay(100);
 }
