@@ -21,6 +21,12 @@ const PlantConfig PLANTS[] = {
     "parlor_palm",
     A1,
     850
+  },
+  {
+    "Calathea",
+    "calathea",
+    A2,
+    850
   }
 };
 

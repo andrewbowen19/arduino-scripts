@@ -14,10 +14,10 @@ const char FOUNDRY_HOST[] =
 const char FOUNDRY_STREAM_RID[] =
     "ri.foundry.main.dataset.d746df15-c23d-41de-908d-a17e9050ee64";
 
-// Publish every 10 seconds.
+// Publish every 30 seconds.
 // Increase this for normal operation if readings do not need to
 // be sent this frequently.
-const unsigned long PUBLISH_INTERVAL_MS = 10000;
+const unsigned long PUBLISH_INTERVAL_MS = 30000;
 
 // Maximum time to wait for an HTTP response.
 const unsigned long HTTP_TIMEOUT_MS = 15000;
